@@ -53,9 +53,6 @@ class Trainer:
 
                 # forward + backward + optimize
                 outputs = self.net(batch, sequences_lengths)
-                if epoch % 10 == 9:
-                    print(outputs)
-                    print(label)
                 loss = self.criterion(outputs, label)
                 loss.backward()
                 self.optimizer.step()

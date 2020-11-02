@@ -12,6 +12,9 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 import torch.optim as optim
 
+
+
+
 class VoxDataset(Dataset):
     def __init__(self, data_path, onehot_encoding, n_mfcc):
         self.n_mfcc = n_mfcc
@@ -66,8 +69,8 @@ class InputNormalizer:
         
     def _calculate_mean_std(self):
         records = 0
-        mean = torch.zeros(10)
-        std = torch.zeros(10)
+        mean = torch.zeros(self.dataset.n_mfcc)
+        std = torch.zeros(self.dataset.n_mfcc)
 
         for mfcc, _ in self.dataset:
             sample_records = len(mfcc)
