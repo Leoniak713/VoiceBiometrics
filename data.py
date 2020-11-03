@@ -12,15 +12,14 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 import torch.optim as optim
 
-
-
-
-class VoxDataset(Dataset):
-    def __init__(self, data_path, onehot_encoding, n_mfcc):
-        self.n_mfcc = n_mfcc
+class DataBuilder:
+    def __init__(self, data_path, onehot_encoding, n_mfcc, num_folds, cache_dir):
         self.metadata, self.num_classes = self._get_metadata(data_path)
-        self.label_fun = self._onehot if onehot_encoding else lambda x: x
-        
+        self.onehot_encoding = onehot_encoding
+        self.n_mfcc = n_mfcc
+        self.folds = self._get_folds(num_folds)
+        self.cache_dir = cache_dir
+
     @staticmethod
     def _get_metadata(data_path):
         metadata = []
@@ -32,7 +31,46 @@ class VoxDataset(Dataset):
                 user_dir_path = os.path.join(user_path, user_dir)
                 for audio_file in os.listdir(user_dir_path):
                     metadata.append((os.path.join(user_dir_path, audio_file), i))
-        return metadata, num_classes
+        metadata_df = pd.DataFrame(metadata, columns=['filepath', 'label'])
+        return metadata_df, num_classes
+
+    def _get_folds(self, num_folds):
+        metadata_folds = [
+            pd.concat(i) \
+            for i in zip(*[np.array_split(group, num_folds) \
+            for _, group in self.metadata.groupby('label')])
+            ]
+        return metadata_folds
+
+    def __len__(self):
+        return len(self.folds)
+    
+    def __getitem__(self, idx):
+        train_metadata = pd.concat(
+            [fold for i, fold in enumerate(self.folds) if i != idx],
+            ignore_index=True
+            )
+        val_metadata = self.folds[idx].reset_index(drop=True)
+        return self._get_dataset(train_metadata), self._get_dataset(val_metadata)
+
+    def _get_dataset(self, metadata):
+        return VoxDataset(
+            metadata, 
+            self.num_classes, 
+            self.onehot_encoding, 
+            self.n_mfcc, 
+            self.cache_dir
+            )
+
+
+class VoxDataset(Dataset):
+    def __init__(self, metadata, num_classes, onehot_encoding, n_mfcc, cache_dir):
+        self.metadata = metadata
+        self.num_classes = num_classes
+        self.label_fun = self._onehot if onehot_encoding else lambda x: x
+        self.n_mfcc = n_mfcc
+        self.cache_dir = cache_dir
+        os.makedirs(self.cache_dir, exist_ok = True)
     
     def _onehot(self, idx):
         vector = np.zeros(self.num_classes)
@@ -41,26 +79,24 @@ class VoxDataset(Dataset):
     
     def __len__(self):
         return len(self.metadata)
+
+    def __iter__(self):
+        return (self[idx] for idx in range(len(self)))
     
     def __getitem__(self, idx):
-        filename, label = self.metadata[idx]
-        audio = librosa.core.load(filename)
-        mfcc_tensor = torch.tensor(librosa.feature.mfcc(audio[0], n_mfcc=self.n_mfcc).transpose())
-        label_tensor = torch.tensor(self.label_fun(label))
+        recording_metadata = self.metadata.loc[idx]
+        label_tensor = torch.tensor(self.label_fun(recording_metadata['label']))
+        filepath = recording_metadata['filepath']
+        cache_name = '_'.join(filepath.split('/')[-2:])
+        cache_path = os.path.join(self.cache_dir, cache_name)
+        if os.path.exists(cache_path):
+            mfcc_tensor = torch.load(cache_path)
+            assert mfcc_tensor.shape[1] == self.n_mfcc, 'Cache shape mismatch'
+        else:
+            audio = librosa.core.load(filepath)
+            mfcc_tensor = torch.tensor(librosa.feature.mfcc(audio[0], n_mfcc=self.n_mfcc).transpose())
+            torch.save(mfcc_tensor, cache_path)
         return mfcc_tensor, label_tensor
-    
-#     @staticmethod
-#     def collate_fn(batch):
-#         x_sequences = list()
-#         labels = list()
-#         sequences_lengths = list()
-#         for data, label in batch:
-#             x_sequences.append(data)
-#             labels.append(label)
-#             sequences_lengths.append(len(data))
-#         padded_sequences = pad_sequence(x_sequences, batch_first=True, padding_value=-300.)
-#         labels_tensor = torch.stack(labels)
-#         return padded_sequences, labels_tensor, sequences_lengths
     
 class InputNormalizer:
     def __init__(self, dataset):
