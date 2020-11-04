@@ -35,7 +35,8 @@ class Trainer:
             onehot_encoding=onehot_encoding, 
             n_mfcc=config['num_mfccs'], 
             num_folds=5,
-            cache_dir=config['cache_dir']
+            cache_dir=config['cache_dir'],
+            overwrite_cache = config['overwrite_cache']
             )
         self.data_train, self.data_val = self.data_builder[0]
 

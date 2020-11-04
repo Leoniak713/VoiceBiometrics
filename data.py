@@ -1,4 +1,5 @@
 import os
+import shutil
 
 import librosa
 import numpy as np
@@ -13,34 +14,41 @@ from torch.nn.utils.rnn import pad_sequence
 import torch.optim as optim
 
 class DataBuilder:
-    def __init__(self, data_path, onehot_encoding, n_mfcc, num_folds, cache_dir):
-        self.metadata, self.num_classes = self._get_metadata(data_path)
+    def __init__(self, data_path, onehot_encoding, n_mfcc, num_folds, cache_dir, overwrite_cache):
         self.onehot_encoding = onehot_encoding
         self.n_mfcc = n_mfcc
-        self.folds = self._get_folds(num_folds)
         self.cache_dir = cache_dir
+        if os.path.exists(self.cache_dir) and overwrite_cache:
+            shutil.rmtree(self.cache_dir)
+        os.makedirs(self.cache_dir, exist_ok = True)
+        self.folds, self.num_classes = self._get_folds(data_path, num_folds)
 
-    @staticmethod
-    def _get_metadata(data_path):
-        metadata = []
-        users = os.listdir(data_path)
-        num_classes = len(users)
-        for i, user in enumerate(users):
-            user_path = os.path.join(data_path, user)
-            for user_dir in os.listdir(user_path):
-                user_dir_path = os.path.join(user_path, user_dir)
-                for audio_file in os.listdir(user_dir_path):
-                    metadata.append((os.path.join(user_dir_path, audio_file), i))
-        metadata_df = pd.DataFrame(metadata, columns=['filepath', 'label'])
-        return metadata_df, num_classes
-
-    def _get_folds(self, num_folds):
-        metadata_folds = [
-            pd.concat(i) \
-            for i in zip(*[np.array_split(group, num_folds) \
-            for _, group in self.metadata.groupby('label')])
-            ]
-        return metadata_folds
+    def _get_folds(self, data_path, num_folds):
+        fold_paths = [os.path.join(self.cache_dir, f'fold_{i}.csv') for i in range(num_folds)]
+        if all([os.path.exists(fold_path) for fold_path in fold_paths]):
+            metadata_folds = [pd.read_csv(fold_path) for fold_path in fold_paths]
+            num_classes = pd.concat(metadata_folds)['label'].nunique()
+            print('Folds loaded from cache')
+        else:
+            metadata = []
+            users = os.listdir(data_path)
+            num_classes = len(users)
+            for i, user in enumerate(users):
+                user_path = os.path.join(data_path, user)
+                for user_dir in os.listdir(user_path):
+                    user_dir_path = os.path.join(user_path, user_dir)
+                    for audio_file in os.listdir(user_dir_path):
+                        metadata.append((os.path.join(user_dir_path, audio_file), i))
+            metadata_df = pd.DataFrame(metadata, columns=['filepath', 'label'])
+            metadata_folds = [
+                pd.concat(i) \
+                for i in zip(*[np.array_split(group, num_folds) \
+                for _, group in metadata_df.groupby('label')])
+                ]
+            for fold_path, metadata_fold in zip(fold_paths, metadata_folds):
+                metadata_fold.to_csv(fold_path, index=False)
+            print('Folds created')
+        return metadata_folds, num_classes
 
     def __len__(self):
         return len(self.folds)
@@ -51,26 +59,27 @@ class DataBuilder:
             ignore_index=True
             )
         val_metadata = self.folds[idx].reset_index(drop=True)
-        return self._get_dataset(train_metadata), self._get_dataset(val_metadata)
+        return self._get_dataset(train_metadata, idx), self._get_dataset(val_metadata, idx)
 
-    def _get_dataset(self, metadata):
+    def _get_dataset(self, metadata, fold_id):
         return VoxDataset(
             metadata, 
             self.num_classes, 
             self.onehot_encoding, 
             self.n_mfcc, 
-            self.cache_dir
+            self.cache_dir,
+            fold_id
             )
 
 
 class VoxDataset(Dataset):
-    def __init__(self, metadata, num_classes, onehot_encoding, n_mfcc, cache_dir):
+    def __init__(self, metadata, num_classes, onehot_encoding, n_mfcc, cache_dir, fold_id):
         self.metadata = metadata
         self.num_classes = num_classes
         self.label_fun = self._onehot if onehot_encoding else lambda x: x
         self.n_mfcc = n_mfcc
         self.cache_dir = cache_dir
-        os.makedirs(self.cache_dir, exist_ok = True)
+        self.fold_id = fold_id
     
     def _onehot(self, idx):
         vector = np.zeros(self.num_classes)
@@ -91,7 +100,9 @@ class VoxDataset(Dataset):
         cache_path = os.path.join(self.cache_dir, cache_name)
         if os.path.exists(cache_path):
             mfcc_tensor = torch.load(cache_path)
-            assert mfcc_tensor.shape[1] == self.n_mfcc, 'Cache shape mismatch'
+            assert mfcc_tensor.shape[1] == self.n_mfcc, \
+                f"""MFCC cache shape mismatch: {mfcc_tensor.shape[1]} 
+                while {self.n_mfcc} was given in config"""
         else:
             audio = librosa.core.load(filepath)
             mfcc_tensor = torch.tensor(librosa.feature.mfcc(audio[0], n_mfcc=self.n_mfcc).transpose())
@@ -101,20 +112,35 @@ class VoxDataset(Dataset):
 class InputNormalizer:
     def __init__(self, dataset):
         self.dataset = dataset
-        self.mean, self.std = self._calculate_mean_std()
+        self.cache_dir = self.dataset.cache_dir
+        self.fold_id = self.dataset.fold_id
+        self.mean, self.std = self._get_mean_std()
         
-    def _calculate_mean_std(self):
-        records = 0
-        mean = torch.zeros(self.dataset.n_mfcc)
-        std = torch.zeros(self.dataset.n_mfcc)
+    def _get_mean_std(self):
+        mean_cache_path = os.path.join(self.cache_dir, f'normalizer_mean_{self.fold_id}.pt')
+        std_cache_path = os.path.join(self.cache_dir, f'normalizer_std_{self.fold_id}.pt')
+        if os.path.exists(mean_cache_path) and os.path.exists(std_cache_path):
+            mean = torch.load(mean_cache_path)
+            std = torch.load(std_cache_path)
+            assert mean.shape[0] == std.shape[0] == self.dataset.n_mfcc, \
+                f"""Mean and std cache shape mismatch: {mean.shape[0]} and {std.shape[0]}
+                while {self.dataset.n_mfcc} was given in config"""
+            print('Mean and std loaded from cache')
+        else:
+            records = 0
+            mean = torch.zeros(self.dataset.n_mfcc)
+            std = torch.zeros(self.dataset.n_mfcc)
 
-        for mfcc, _ in self.dataset:
-            sample_records = len(mfcc)
-            sample_mean = torch.mean(mfcc, axis=0)
-            mean = (mean * records + sample_mean * sample_records) / (records + sample_records)
-            sample_std = torch.std(mfcc, axis=0)
-            std = (std * records + sample_std * sample_records) / (records + sample_records)
-            records += sample_records
+            for mfcc, _ in self.dataset:
+                sample_records = len(mfcc)
+                sample_mean = torch.mean(mfcc, axis=0)
+                mean = (mean * records + sample_mean * sample_records) / (records + sample_records)
+                sample_std = torch.std(mfcc, axis=0)
+                std = (std * records + sample_std * sample_records) / (records + sample_records)
+                records += sample_records
+            torch.save(mean, mean_cache_path)
+            torch.save(std, std_cache_path)
+            print('Mean and std calculated')
             
         return mean, std
 
