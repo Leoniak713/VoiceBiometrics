@@ -21,45 +21,51 @@ class Trainer:
         if self.config['loss'] == 'CrossEntropy':
             self.criterion = nn.CrossEntropyLoss()
             onehot_encoding = False
-            add_softmax = False
+            self.add_softmax = False
         elif self.config['loss'] == 'BCE':
             self.criterion = nn.BCEWithLogitsLoss()
             onehot_encoding = True
-            add_softmax = True
+            self.add_softmax = True
         else:
             raise BaseException('Invalid loss')
         self.device = config['device']
-        #self.data = VoxDataset(config['data_path'], onehot_encoding=onehot_encoding, n_mfcc=config['num_mfccs'])
         self.data_builder = DataBuilder(
             config['data_path'], 
-            onehot_encoding=onehot_encoding, 
-            n_mfcc=config['num_mfccs'], 
-            num_folds=5,
-            cache_dir=config['cache_dir'],
-            overwrite_cache = config['overwrite_cache']
+            onehot_encoding = onehot_encoding, 
+            n_mfcc = config['num_mfccs'], 
+            num_folds = 5,
+            cache_dir = config['cache_dir'],
+            overwrite_cache = config['overwrite_cache'],
+            equalize = config['equalize']
             )
-        self.data_train, self.data_val = self.data_builder[0]
 
-        self.input_normalizer = InputNormalizer(self.data_train)
-        self.dataloader_train = DataLoader(self.data_train, 
-                                     batch_size=self.config['batch_size'], 
-                                     shuffle=True, 
-                                     num_workers=self.config['batch_size'], 
-                                     collate_fn=self.input_normalizer.collate_fn)
-        self.dataloader_val = DataLoader(self.data_val, 
-                                     batch_size=self.config['batch_size'], 
-                                     shuffle=True, 
-                                     num_workers=self.config['batch_size'], 
-                                     collate_fn=self.input_normalizer.collate_fn)
-        self.net = config['network'](self.data_train.num_classes, add_softmax, self.config).to(self.device)
-        self.optimizer = optim.SGD(self.net.parameters(), lr=self.config['learning_rate'])
-        
+
     def train(self):
-        self.net.train()
+        for data_train, data_val in self.data_builder:
+            input_normalizer = InputNormalizer(data_train)
+            dataloader_train = DataLoader(data_train, 
+                                        batch_size=self.config['batch_size'], 
+                                        shuffle=True, 
+                                        num_workers=self.config['batch_size'], 
+                                        collate_fn=input_normalizer.collate_fn)
+            dataloader_val = DataLoader(data_val, 
+                                        batch_size=self.config['batch_size'], 
+                                        shuffle=True, 
+                                        num_workers=self.config['batch_size'], 
+                                        collate_fn=input_normalizer.collate_fn)
+            net = self.config['network'](self.data_builder.num_classes, self.add_softmax, self.config).to(self.device)
+            self.run_training(net, dataloader_train)
+            self.run_validation(net, dataloader_train)
+            self.run_validation(net, dataloader_val)
+
+        
+    def run_training(self, model, dataloader):
+        self.optimizer = optim.SGD(model.parameters(), lr=self.config['learning_rate'])
+        model.train()
         for epoch in range(self.config['num_epochs']):  # loop over the dataset multiple times
 
             running_loss = 0.0
-            for i, (batch, label, sequences_lengths) in enumerate(self.dataloader_train):
+            for i, (batch, label, sequences_lengths) in enumerate(dataloader):
                 batch = batch.to(self.device)
                 label = label.to(self.device)
 
@@ -67,7 +73,7 @@ class Trainer:
                 self.optimizer.zero_grad()
 
                 # forward + backward + optimize
-                outputs = self.net(batch, sequences_lengths)
+                outputs = model(batch, sequences_lengths)
                 loss = self.criterion(outputs, label)
                 loss.backward()
                 self.optimizer.step()
@@ -78,24 +84,20 @@ class Trainer:
 
         print('Finished Training')
         
-    def validate(self, validate_on_train=False, verbose=False):
-        if validate_on_train:
-            dataloader = self.dataloader_train
-            num_records = self.data_train
-        else:
-            dataloader = self.dataloader_val
-            num_records = self.data_val
-
-        self.net.eval()
+    def run_validation(self, model, dataloader, verbose=False):
+        model.eval()
         accurate_predictions = 0
+        num_records = 0
         with torch.no_grad():
             for i, (batch, label, sequences_lengths) in enumerate(dataloader):
                 batch = batch.to(self.device)
-                outputs = self.net(batch, sequences_lengths).cpu()
+                outputs = model(batch, sequences_lengths).cpu()
                 predictions = np.argmax(outputs, axis=1)
                 accurate_predictions += sum(predictions==label).item()
+                num_records += len(predictions)
                 if verbose:
                     print(outputs)
                     print(label)
-        print(f"""Finished Evaluation: {accurate_predictions}/{len(num_records)} 
-            ({round(accurate_predictions/len(num_records)*100, 2)}%) accurate""")
+        print(f"""Finished Evaluation: 
+            {accurate_predictions}/{num_records} 
+            ({round(accurate_predictions/num_records*100, 2)}%) accurate""")

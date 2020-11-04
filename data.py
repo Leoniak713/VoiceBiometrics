@@ -13,11 +13,63 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 import torch.optim as optim
 
+class Fold:
+    def __init__(self):
+        self.metadata = []
+        self.user_fold_count = 0
+        
+    def __len__(self):
+        return len(self.metadata)
+        
+    def extend(self, data):
+        self.metadata.extend(data)
+        self.user_fold_count += len(data)
+        
+    def zero_user_counter(self):
+        self.user_fold_count = 0
+
+class FoldsBuilder:
+    def __init__(self, num_folds, equalize=True):
+        self.folds = [Fold() for _ in range(num_folds)]
+        self.equalize = equalize
+        
+    def __iter__(self):
+        return (fold for fold in self.folds)
+        
+    def zero_counters(self):
+        for fold in self.folds:
+            fold.zero_user_counter()
+            
+    def _get_smallest_fold(self):
+        smallest_fold = self.folds[0]
+        for fold in self.folds:
+            if fold.user_fold_count < smallest_fold.user_fold_count \
+                or (
+                    self.equalize \
+                    and (fold.user_fold_count == smallest_fold.user_fold_count) \
+                    and (len(fold) < len(smallest_fold))
+                   ):
+                smallest_fold = fold
+        return smallest_fold
+    
+    def add(self, data):
+        smallest_fold = self._get_smallest_fold()
+        smallest_fold.extend(data)
+
 class DataBuilder:
-    def __init__(self, data_path, onehot_encoding, n_mfcc, num_folds, cache_dir, overwrite_cache):
+    def __init__(
+        self, 
+        data_path, 
+        onehot_encoding, 
+        n_mfcc, num_folds, 
+        cache_dir, 
+        overwrite_cache, 
+        equalize
+        ):
         self.onehot_encoding = onehot_encoding
         self.n_mfcc = n_mfcc
         self.cache_dir = cache_dir
+        self.equalize = equalize
         if os.path.exists(self.cache_dir) and overwrite_cache:
             shutil.rmtree(self.cache_dir)
         os.makedirs(self.cache_dir, exist_ok = True)
@@ -25,28 +77,36 @@ class DataBuilder:
 
     def _get_folds(self, data_path, num_folds):
         fold_paths = [os.path.join(self.cache_dir, f'fold_{i}.csv') for i in range(num_folds)]
+
         if all([os.path.exists(fold_path) for fold_path in fold_paths]):
             metadata_folds = [pd.read_csv(fold_path) for fold_path in fold_paths]
             num_classes = pd.concat(metadata_folds)['label'].nunique()
             print('Folds loaded from cache')
+
         else:
-            metadata = []
+            folds = FoldsBuilder(num_folds, self.equalize)
             users = os.listdir(data_path)
             num_classes = len(users)
-            for i, user in enumerate(users):
+            
+            for user_id, user in enumerate(users):
+                folds.zero_counters()
+                user_metadata = []
                 user_path = os.path.join(data_path, user)
+                
                 for user_dir in os.listdir(user_path):
                     user_dir_path = os.path.join(user_path, user_dir)
-                    for audio_file in os.listdir(user_dir_path):
-                        metadata.append((os.path.join(user_dir_path, audio_file), i))
-            metadata_df = pd.DataFrame(metadata, columns=['filepath', 'label'])
-            metadata_folds = [
-                pd.concat(i) \
-                for i in zip(*[np.array_split(group, num_folds) \
-                for _, group in metadata_df.groupby('label')])
-                ]
+                    dir_files = os.listdir(user_dir_path)
+                    metadata = [(os.path.join(user_dir_path, audio_file), user_id) for audio_file in dir_files]
+                    user_metadata.append(metadata)
+                    
+                for metadata in sorted(user_metadata, key=lambda x: len(x), reverse=True):
+                    folds.add(metadata)
+                    
+            metadata_folds = [pd.DataFrame(fold.metadata, columns=['filepath', 'label']) for fold in folds]
+
             for fold_path, metadata_fold in zip(fold_paths, metadata_folds):
                 metadata_fold.to_csv(fold_path, index=False)
+
             print('Folds created')
         return metadata_folds, num_classes
 
