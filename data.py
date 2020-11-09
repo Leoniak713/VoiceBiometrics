@@ -35,6 +35,9 @@ class FoldsBuilder:
         
     def __iter__(self):
         return (fold for fold in self.folds)
+
+    def __getitem__(self, idx):
+        return self.folds[idx]
         
     def zero_counters(self):
         for fold in self.folds:
@@ -61,14 +64,16 @@ class DataBuilder:
         self, 
         data_path, 
         onehot_encoding, 
-        n_mfcc, num_folds, 
+        preprocessing_params, 
+        num_folds, 
         cache_dir, 
         overwrite_cache, 
         equalize
         ):
         self.onehot_encoding = onehot_encoding
-        self.n_mfcc = n_mfcc
-        self.cache_dir = cache_dir
+        self.preprocessing_params = preprocessing_params
+        cache_dir_name = '_'.join([f'{param}_{value}' for param, value in sorted(preprocessing_params.items())])
+        self.cache_dir = os.path.join(cache_dir, cache_dir_name)
         self.equalize = equalize
         if os.path.exists(self.cache_dir) and overwrite_cache:
             shutil.rmtree(self.cache_dir)
@@ -119,25 +124,28 @@ class DataBuilder:
             ignore_index=True
             )
         val_metadata = self.folds[idx].reset_index(drop=True)
-        return self._get_dataset(train_metadata, idx), self._get_dataset(val_metadata, idx)
+        train_dataset = self._get_dataset(train_metadata, idx)
+        val_dataset = self._get_dataset(val_metadata, idx)
+        input_normalizer = InputNormalizer(train_dataset)
+        return train_dataset, val_dataset, input_normalizer
 
     def _get_dataset(self, metadata, fold_id):
         return VoxDataset(
             metadata, 
             self.num_classes, 
             self.onehot_encoding, 
-            self.n_mfcc, 
+            self.preprocessing_params, 
             self.cache_dir,
             fold_id
             )
 
 
 class VoxDataset(Dataset):
-    def __init__(self, metadata, num_classes, onehot_encoding, n_mfcc, cache_dir, fold_id):
+    def __init__(self, metadata, num_classes, onehot_encoding, preprocessing_params, cache_dir, fold_id):
         self.metadata = metadata
         self.num_classes = num_classes
         self.label_fun = self._onehot if onehot_encoding else lambda x: x
-        self.n_mfcc = n_mfcc
+        self.preprocessing_params = preprocessing_params
         self.cache_dir = cache_dir
         self.fold_id = fold_id
     
@@ -160,18 +168,31 @@ class VoxDataset(Dataset):
         cache_path = os.path.join(self.cache_dir, cache_name)
         if os.path.exists(cache_path):
             mfcc_tensor = torch.load(cache_path)
-            assert mfcc_tensor.shape[1] == self.n_mfcc, \
+            assert mfcc_tensor.shape[1] == self.preprocessing_params['n_mfcc'], \
                 f"""MFCC cache shape mismatch: {mfcc_tensor.shape[1]} 
-                while {self.n_mfcc} was given in config"""
+                while {self.preprocessing_params['n_mfcc']} was given in config"""
         else:
             audio = librosa.core.load(filepath)
-            mfcc_tensor = torch.tensor(librosa.feature.mfcc(audio[0], n_mfcc=self.n_mfcc).transpose())
+            mfcc_tensor = torch.tensor(
+                librosa.feature.mfcc(
+                    audio[0], 
+                    **self.preprocessing_params
+                    ).transpose()
+                )
             torch.save(mfcc_tensor, cache_path)
         return mfcc_tensor, label_tensor
     
 class InputNormalizer:
     def __init__(self, dataset):
         self.dataset = dataset
+        self.dataloader = DataLoader(
+            dataset, 
+            batch_size=48,
+            shuffle=False,
+            num_workers=12,
+            drop_last=False,
+            collate_fn=self._internal_collate_fn
+            )
         self.cache_dir = self.dataset.cache_dir
         self.fold_id = self.dataset.fold_id
         self.mean, self.std = self._get_mean_std()
@@ -182,16 +203,16 @@ class InputNormalizer:
         if os.path.exists(mean_cache_path) and os.path.exists(std_cache_path):
             mean = torch.load(mean_cache_path)
             std = torch.load(std_cache_path)
-            assert mean.shape[0] == std.shape[0] == self.dataset.n_mfcc, \
+            assert mean.shape[0] == std.shape[0] == self.dataset.preprocessing_params['n_mfcc'], \
                 f"""Mean and std cache shape mismatch: {mean.shape[0]} and {std.shape[0]}
-                while {self.dataset.n_mfcc} was given in config"""
+                while {self.dataset.preprocessing_params['n_mfcc']} was given in config"""
             print('Mean and std loaded from cache')
         else:
             records = 0
-            mean = torch.zeros(self.dataset.n_mfcc)
-            std = torch.zeros(self.dataset.n_mfcc)
+            mean = torch.zeros(self.dataset.preprocessing_params['n_mfcc'])
+            std = torch.zeros(self.dataset.preprocessing_params['n_mfcc'])
 
-            for mfcc, _ in self.dataset:
+            for mfcc in self.dataloader:
                 sample_records = len(mfcc)
                 sample_mean = torch.mean(mfcc, axis=0)
                 mean = (mean * records + sample_mean * sample_records) / (records + sample_records)
@@ -203,6 +224,10 @@ class InputNormalizer:
             print('Mean and std calculated')
             
         return mean, std
+
+    @staticmethod
+    def _internal_collate_fn(batch):
+        return torch.cat([mfcc for mfcc, _ in batch], 0)
 
     def collate_fn(self, batch):
         max_length = max((len(sequence) for sequence, _ in batch))
