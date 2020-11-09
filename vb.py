@@ -6,8 +6,6 @@ from tqdm import tqdm
 import librosa
 import numpy as np
 import pandas as pd
-import seaborn as sns
-import matplotlib.pyplot as plt
 
 import torch
 from torch import nn
@@ -21,6 +19,7 @@ from torchviz import make_dot, make_dot_from_trace
 from models import BiggerCNNLSTM
 from data import VoxDataset, InputNormalizer, DataBuilder
 from hps import HPSParser
+from monitors import ExperimentMonitor, ScoresMonitor
 
 def run_experiment(source_config):
     hps_parser = HPSParser(source_config)
@@ -66,8 +65,7 @@ class Trainer:
 
 
     def run_training(self):
-        fold_scores = []
-        data_size = 0
+        experiment_monitor = ExperimentMonitor()
         for fold in islice(self.data_builder, self.config['num_fold_trainings']):
             model = Model(
                 fold, 
@@ -77,13 +75,9 @@ class Trainer:
                 self.config
             )
             model.train()
-            model.scores_monitor.plot_scores()
-            val_size = len(fold[1])
-            fold_scores.append((model.scores_monitor.get_scores(), val_size))
-            data_size += val_size
+            experiment_monitor.add_scores_monitor(model.scores_monitor)
         
-        best_score = max(sum([np.array(scores) * val_size / data_size \
-            for scores, val_size in fold_scores]))
+        best_score = experiment_monitor.show_scores()
         return best_score
 
     def visualize_model(self):
@@ -143,7 +137,6 @@ class Model:
             )
         for _ in tqdm(range(self.config['num_epochs'])):
             self.network.train()
-            print(scheduler.get_lr())
             for batch, label, _ in self.dataloader_train:
                 optimizer.zero_grad()
                 batch = batch.to(self.device)
@@ -171,74 +164,4 @@ class Model:
                     print(outputs)
                     print(label)
             self.scores_monitor.val_monitor.append_epoch_loss_and_score()
-
-class ScoresMonitor:
-    def __init__(self, data_train, data_val):
-        self.data_train = data_train
-        self.data_val = data_val
-        self.baseline_accuracy = self.get_baseline_accuracy()
-        self.num_classes = len(self.data_train.metadata['label'].unique())
-        self.train_monitor = ScoreMonitor()
-        self.val_monitor = ScoreMonitor(self.num_classes)
-
-    def get_baseline_accuracy(self):
-        mode_class = self.data_train.metadata['label'].value_counts().index[0]
-        return len(self.data_val.metadata.query(f'label=={mode_class}')) \
-            / len(self.data_val) * 100
-
-    def plot_scores(self):
-        fig, axs = plt.subplots(ncols=3, figsize=(30,7))
-        axs[0].plot(self.train_monitor.epochs_loss, label='Train loss')
-        axs[0].plot(self.val_monitor.epochs_loss, label='Valid loss')
-        axs[0].legend(loc='best')
-
-        baseline_accuracy = [self.baseline_accuracy] * len(self.train_monitor.epochs_loss)
-        axs[1].plot(self.train_monitor.epochs_scores, label='Train acc')
-        axs[1].plot(self.val_monitor.epochs_scores, label='Valid acc')
-        axs[1].plot(baseline_accuracy, '.', label='Baseline acc')
-        axs[1].legend(loc='best')
-
-        ax = sns.heatmap(self.val_monitor.confusion_matrixes[-1], annot=True)
-        ax.set(xlabel='Actual', ylabel='Predicted')
-        ax.xaxis.set_label_position('top') 
-        ax.tick_params(labelbottom = False, labeltop=True)
-        axs[2] = ax
-        plt.show()
-
-    def get_scores(self):
-        return self.val_monitor.epochs_scores
-
-
-class ScoreMonitor:
-    def __init__(self, num_classes=None):
-        self.num_classes = num_classes
-        self.loss = 0
-        self.epochs_loss = list()
-        self.accurate_predictions = 0
-        self.num_records = 0
-        self.epochs_scores = list()
-        self.confusion_matrixes = None
-        if self.num_classes:
-            self.confusion_matrixes = list()
-            self.epoch_confusion_matrix = np.zeros([self.num_classes, self.num_classes])
-
-    def add_loss_and_predictions(self, loss, outputs, labels):
-        self.loss += loss.item()
-        predictions = np.argmax(outputs.cpu().detach().numpy(), axis=1)
-        labels = labels.cpu().detach().numpy()
-        self.accurate_predictions += sum(predictions==labels).item()
-        self.num_records += len(predictions)
-        if self.confusion_matrixes is not None:
-            for prediction, label in zip(predictions, labels):
-                self.epoch_confusion_matrix[prediction, label] += 1
-
-    def append_epoch_loss_and_score(self):
-        self.epochs_loss.append(self.loss / self.num_records)
-        self.epochs_scores.append(round(self.accurate_predictions / self.num_records*100, 2))
-        self.accurate_predictions = 0
-        self.num_records = 0
-        self.loss = 0
-        if self.confusion_matrixes is not None:
-            self.confusion_matrixes.append(self.epoch_confusion_matrix)
-            self.epoch_confusion_matrix = np.zeros([self.num_classes, self.num_classes])
 
