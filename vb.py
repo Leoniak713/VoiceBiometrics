@@ -29,10 +29,13 @@ def run_experiment(source_config):
         print(drawn_variants)
         trainer = Trainer(config)
         start_time = time.time()
-        best_score = trainer.run_training()
-        training_time = time.time() - start_time
+        best_score, best_score_index, best_score_train_acc, best_score_loss = trainer.run_training()
+        training_time = round((time.time() - start_time) / 60, 1)
+        drawn_variants['Time'] = training_time
+        drawn_variants['Loss'] = best_score_loss
+        drawn_variants['Best epoch'] = best_score_index
+        drawn_variants['Accuracy (train)'] = best_score_train_acc
         drawn_variants['Accuracy'] = best_score
-        drawn_variants['Training time'] = training_time
         experiments_logs.append(drawn_variants)
     experiment_df = pd.DataFrame(experiments_logs)\
         .sort_values('Accuracy', ascending=False, inplace=False, ignore_index=True)
@@ -65,7 +68,7 @@ class Trainer:
 
 
     def run_training(self):
-        experiment_monitor = ExperimentMonitor()
+        experiment_monitor = ExperimentMonitor(self.config)
         for fold in islice(self.data_builder, self.config['num_fold_trainings']):
             model = Model(
                 fold, 
@@ -76,9 +79,8 @@ class Trainer:
             )
             model.train()
             experiment_monitor.add_scores_monitor(model.scores_monitor)
-        
-        best_score = experiment_monitor.show_scores()
-        return best_score
+        best_score_stats = experiment_monitor.show_scores()
+        return best_score_stats
 
     def visualize_model(self):
         model = Model(
@@ -149,7 +151,6 @@ class Model:
             self.scores_monitor.train_monitor.append_epoch_loss_and_score()
             self.validate()
             scheduler.step()
-        print('Finished Training')
         
     def validate(self, verbose=False):
         self.network.eval()

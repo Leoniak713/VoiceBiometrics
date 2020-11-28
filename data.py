@@ -86,7 +86,6 @@ class DataBuilder:
         if all([os.path.exists(fold_path) for fold_path in fold_paths]):
             metadata_folds = [pd.read_csv(fold_path) for fold_path in fold_paths]
             num_classes = pd.concat(metadata_folds)['label'].nunique()
-            print('Folds loaded from cache')
 
         else:
             folds = FoldsBuilder(num_folds, self.equalize)
@@ -111,8 +110,6 @@ class DataBuilder:
 
             for fold_path, metadata_fold in zip(fold_paths, metadata_folds):
                 metadata_fold.to_csv(fold_path, index=False)
-
-            print('Folds created')
         return metadata_folds, num_classes
 
     def __len__(self):
@@ -172,10 +169,11 @@ class VoxDataset(Dataset):
                 f"""MFCC cache shape mismatch: {mfcc_tensor.shape[1]} 
                 while {self.preprocessing_params['n_mfcc']} was given in config"""
         else:
-            audio = librosa.core.load(filepath)
+            audio, sr = librosa.core.load(filepath, sr=None)
             mfcc_tensor = torch.tensor(
                 librosa.feature.mfcc(
-                    audio[0], 
+                    audio,
+                    sr,
                     **self.preprocessing_params
                     ).transpose()
                 )
@@ -206,7 +204,6 @@ class InputNormalizer:
             assert mean.shape[0] == std.shape[0] == self.dataset.preprocessing_params['n_mfcc'], \
                 f"""Mean and std cache shape mismatch: {mean.shape[0]} and {std.shape[0]}
                 while {self.dataset.preprocessing_params['n_mfcc']} was given in config"""
-            print('Mean and std loaded from cache')
         else:
             records = 0
             mean = torch.zeros(self.dataset.preprocessing_params['n_mfcc'])
@@ -221,7 +218,6 @@ class InputNormalizer:
                 records += sample_records
             torch.save(mean, mean_cache_path)
             torch.save(std, std_cache_path)
-            print('Mean and std calculated')
             
         return mean, std
 

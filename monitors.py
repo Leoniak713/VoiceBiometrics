@@ -4,7 +4,8 @@ import matplotlib.pyplot as plt
 
 
 class ExperimentMonitor:
-    def __init__(self):
+    def __init__(self, config):
+        self.config = config
         self.scores_monitors = []
 
     def add_scores_monitor(self, scores_monitor):
@@ -34,8 +35,11 @@ class ExperimentMonitor:
             scores_monitor.get_baseline_accurate_predictions() \
             for scores_monitor in self.scores_monitors]) / val_records * 100
         best_score_index, best_score = max(enumerate(val_accuracy), key=lambda p: p[1])
+        best_score_train_acc = round(train_accuracy[best_score_index], 2)
+        best_score_loss = round(val_loss[best_score_index], 4)
+        print(round(best_score, 2))
 
-        _, axs = plt.subplots(ncols=3, figsize=(30,7))
+        _, axs = plt.subplots(ncols=2, figsize=(30,7))
         axs[0].plot(train_loss, label='Train loss')
         axs[0].plot(val_loss, label='Valid loss')
         axs[0].legend(loc='best')
@@ -44,15 +48,19 @@ class ExperimentMonitor:
         axs[1].plot(val_accuracy, label='Valid acc')
         axs[1].plot([baseline_accuracy] * len(train_loss), '.', label='Baseline acc')
         axs[1].legend(loc='best')
+        plt.show()
 
-        print(val_confusion_matrixes[best_score_index].dtype)
-        ax = sns.heatmap(val_confusion_matrixes[best_score_index].astype(int), annot=True, fmt='d')
+        plt.figure(figsize = (30, 18))
+        ax = sns.heatmap(
+            val_confusion_matrixes[best_score_index].astype(int), 
+            annot=self.config['annotate_cm'], 
+            fmt='d'
+            )
         ax.set(xlabel='Actual', ylabel='Predicted')
         ax.xaxis.set_label_position('top') 
         ax.tick_params(labelbottom = False, labeltop=True)
-        axs[2] = ax
         plt.show()
-        return round(best_score, 2)
+        return round(best_score, 2), best_score_index + 1, best_score_train_acc, best_score_loss
 
 
 class ScoresMonitor:

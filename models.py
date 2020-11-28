@@ -21,6 +21,8 @@ class BiggerCNNLSTM(nn.Module):
 
         self.num_mfccs = config['preprocessing']['n_mfcc']
         self.num_outputs = num_outputs
+
+        self.bidirectionally_coef = 2 if self.config['lstm'][0]['bidirectional'] else 1
         
         self.identity = nn.Identity()
         self.relu = nn.ReLU()
@@ -47,10 +49,12 @@ class BiggerCNNLSTM(nn.Module):
             batch_first=True,
             **config['lstm'][0]
             )
-        self.batch_norm_lstm = nn.BatchNorm1d(config['lstm'][0]['hidden_size']) \
+        self.batch_norm_lstm = nn.BatchNorm1d(
+            config['lstm'][0]['hidden_size'] * self.bidirectionally_coef
+            ) \
             if config['lstm'][1]['batch_norm'] else self.identity
 
-        fc_layers_input_channels = [config['lstm'][0]['hidden_size']] + \
+        fc_layers_input_channels = [config['lstm'][0]['hidden_size'] * self.bidirectionally_coef] + \
             [out_features for (out_features, _, _) in config['fc_layers'][:-1]]
         self.fc_layers = nn.ModuleList()
         for in_features, (out_features, batch_norm, dropout) in zip(fc_layers_input_channels, config['fc_layers']):
@@ -66,7 +70,7 @@ class BiggerCNNLSTM(nn.Module):
         
     def get_initial_state(self, batch_size):
         return torch.zeros(
-            self.config['lstm'][0]['num_layers'], 
+            self.config['lstm'][0]['num_layers'] * self.bidirectionally_coef, 
             batch_size, 
             self.config['lstm'][0]['hidden_size'], 
             device=self.device
