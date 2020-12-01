@@ -1,3 +1,4 @@
+import typing as t
 import os
 
 import librosa
@@ -13,7 +14,7 @@ from torch.nn.utils.rnn import pad_sequence
 import torch.optim as optim
 
 class BiggerCNNLSTM(nn.Module):
-    def __init__(self, num_outputs, add_softmax, config):
+    def __init__(self, num_outputs: int, add_softmax: bool, config: t.Dict) -> None:
         super(BiggerCNNLSTM, self).__init__()
         self.config = config
         self.device = config['device']
@@ -68,7 +69,7 @@ class BiggerCNNLSTM(nn.Module):
             )
         self.output_layer = nn.Linear(config['fc_layers'][-1][0], self.num_outputs)
         
-    def get_initial_state(self, batch_size):
+    def get_initial_state(self, batch_size: int) -> torch.Tensor:
         return torch.zeros(
             self.config['lstm'][0]['num_layers'] * self.bidirectionally_coef, 
             batch_size, 
@@ -76,7 +77,7 @@ class BiggerCNNLSTM(nn.Module):
             device=self.device
             )
 
-    def forward(self, x, lstm_position=-1):
+    def forward(self, x: torch.Tensor, lstm_position: int = -1) -> None:
         h0 = self.get_initial_state(x.shape[0])
         c0 = self.get_initial_state(x.shape[0])
         

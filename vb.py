@@ -1,6 +1,7 @@
-import os
-import time
 from itertools import islice
+import time
+import typing as t
+import os
 
 from tqdm import tqdm
 import librosa
@@ -14,14 +15,15 @@ from torch.nn.utils.rnn import pad_sequence
 import torch.optim as optim
 from torch.optim.lr_scheduler import StepLR
 
+from graphviz import Digraph
 from torchviz import make_dot, make_dot_from_trace
 
 from models import BiggerCNNLSTM
-from data import VoxDataset, InputNormalizer, DataBuilder
+from data import Fold, VoxDataset, InputNormalizer, DataBuilder
 from hps import HPSParser
 from monitors import ExperimentMonitor, ScoresMonitor
 
-def run_experiment(source_config):
+def run_experiment(source_config: t.Dict) -> pd.DataFrame:
     hps_parser = HPSParser(source_config)
     experiments_logs = []
     for _ in range(source_config['num_hps_runs']):
@@ -42,7 +44,7 @@ def run_experiment(source_config):
     return experiment_df
 
 class Trainer:
-    def __init__(self, config):
+    def __init__(self, config: t.Dict) -> None:
         self.config = config
         if self.config['loss'] == 'CrossEntropy':
             self.criterion = nn.CrossEntropyLoss()
@@ -67,7 +69,7 @@ class Trainer:
         self.num_classes = self.data_builder.num_classes
 
 
-    def run_training(self):
+    def run_training(self) -> t.Tuple[float]:
         experiment_monitor = ExperimentMonitor(self.config)
         for fold in islice(self.data_builder, self.config['num_fold_trainings']):
             model = Model(
@@ -82,7 +84,7 @@ class Trainer:
         best_score_stats = experiment_monitor.show_scores()
         return best_score_stats
 
-    def visualize_model(self):
+    def visualize_model(self) -> Digraph:
         model = Model(
             self.data_builder[0], 
             self.num_classes, 
@@ -102,7 +104,14 @@ class Trainer:
 
 
 class Model:
-    def __init__(self, fold, num_classes, add_softmax, criterion, config):
+    def __init__(
+        self, 
+        fold: Fold, 
+        num_classes: int, 
+        add_softmax: bool, 
+        criterion: nn.Module, 
+        config: t.Dict
+    ):
         self.config = config
         self.device = config['device']
         self.criterion = criterion
@@ -112,7 +121,7 @@ class Model:
             batch_size=self.config['batch_size'],
             shuffle=True,
             num_workers=self.config['batch_size'],
-            drop_last=True,
+            drop_last=self.config['drop_last'],
             collate_fn=input_normalizer.collate_fn
             )
         self.dataloader_val = DataLoader(
@@ -120,7 +129,7 @@ class Model:
             batch_size=self.config['batch_size'],
             shuffle=True,
             num_workers=self.config['batch_size'],
-            drop_last=True,
+            drop_last=self.config['drop_last'],
             collate_fn=input_normalizer.collate_fn
             )
         self.network = self.config['network'](
@@ -131,7 +140,7 @@ class Model:
         self.scores_monitor = ScoresMonitor(data_train, data_val)
 
 
-    def train(self):
+    def train(self) -> None:
         optimizer = optim.SGD(self.network.parameters(), lr=self.config['learning_rate'])
         scheduler = StepLR(
             optimizer, 
@@ -152,7 +161,7 @@ class Model:
             self.validate()
             scheduler.step()
         
-    def validate(self, verbose=False):
+    def validate(self, verbose: bool = False) -> None:
         self.network.eval()
         with torch.no_grad():
             for batch, label, _ in self.dataloader_val:

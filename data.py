@@ -1,3 +1,4 @@
+import typing as t
 import os
 import shutil
 
@@ -14,36 +15,36 @@ from torch.nn.utils.rnn import pad_sequence
 import torch.optim as optim
 
 class Fold:
-    def __init__(self):
+    def __init__(self) -> None:
         self.metadata = []
         self.user_fold_count = 0
         
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.metadata)
         
-    def extend(self, data):
+    def extend(self, data: t.List) -> None:
         self.metadata.extend(data)
         self.user_fold_count += len(data)
         
-    def zero_user_counter(self):
+    def zero_user_counter(self) -> None:
         self.user_fold_count = 0
 
 class FoldsBuilder:
-    def __init__(self, num_folds, equalize=True):
+    def __init__(self, num_folds: int, equalize: bool = True) -> None:
         self.folds = [Fold() for _ in range(num_folds)]
         self.equalize = equalize
         
-    def __iter__(self):
+    def __iter__(self) -> t.Generator:
         return (fold for fold in self.folds)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> Fold:
         return self.folds[idx]
         
-    def zero_counters(self):
+    def zero_counters(self) -> None:
         for fold in self.folds:
             fold.zero_user_counter()
             
-    def _get_smallest_fold(self):
+    def _get_smallest_fold(self) -> Fold:
         smallest_fold = self.folds[0]
         for fold in self.folds:
             if fold.user_fold_count < smallest_fold.user_fold_count \
@@ -55,21 +56,138 @@ class FoldsBuilder:
                 smallest_fold = fold
         return smallest_fold
     
-    def add(self, data):
+    def add(self, data: t.List) -> None:
         smallest_fold = self._get_smallest_fold()
         smallest_fold.extend(data)
+
+
+class VoxDataset(Dataset):
+    def __init__(
+        self, 
+        metadata: pd.DataFrame, 
+        num_classes: int, 
+        onehot_encoding: bool, 
+        preprocessing_params: t.Dict, 
+        cache_dir: str, 
+        fold_id: int
+    ):
+        self.metadata = metadata
+        self.num_classes = num_classes
+        self.label_fun = self._onehot if onehot_encoding else lambda x: x
+        self.preprocessing_params = preprocessing_params
+        self.cache_dir = cache_dir
+        self.fold_id = fold_id
+    
+    def _onehot(self, idx: int) -> np.array:
+        vector = np.zeros(self.num_classes)
+        vector[idx] = 1
+        return vector
+    
+    def __len__(self) -> int:
+        return len(self.metadata)
+
+    def __iter__(self) -> t.Generator:
+        return (self[idx] for idx in range(len(self)))
+    
+    def __getitem__(self, idx: int) -> t.Tuple[torch.Tensor, torch.Tensor]:
+        recording_metadata = self.metadata.loc[idx]
+        label_tensor = torch.tensor(self.label_fun(recording_metadata['label']))
+        filepath = recording_metadata['filepath']
+        cache_name = '_'.join(filepath.split('/')[-2:])
+        cache_path = os.path.join(self.cache_dir, cache_name)
+        if os.path.exists(cache_path):
+            mfcc_tensor = torch.load(cache_path)
+            assert mfcc_tensor.shape[1] == self.preprocessing_params['n_mfcc'], \
+                f"""MFCC cache shape mismatch: {mfcc_tensor.shape[1]} 
+                while {self.preprocessing_params['n_mfcc']} was given in config"""
+        else:
+            audio, sr = librosa.core.load(filepath, sr=None)
+            mfcc_tensor = torch.tensor(
+                librosa.feature.mfcc(
+                    audio,
+                    sr,
+                    **self.preprocessing_params
+                    ).transpose()
+                )
+            torch.save(mfcc_tensor, cache_path)
+        return mfcc_tensor, label_tensor
+
+    
+class InputNormalizer:
+    def __init__(self, dataset: VoxDataset) -> None:
+        self.dataset = dataset
+        self.dataloader = DataLoader(
+            dataset, 
+            batch_size=48,
+            shuffle=False,
+            num_workers=12,
+            drop_last=False,
+            collate_fn=self._internal_collate_fn
+            )
+        self.cache_dir = self.dataset.cache_dir
+        self.fold_id = self.dataset.fold_id
+        self.mean, self.std = self._get_mean_std()
+        
+    def _get_mean_std(self) -> t.Tuple[torch.Tensor, torch.Tensor]:
+        mean_cache_path = os.path.join(self.cache_dir, f'normalizer_mean_{self.fold_id}.pt')
+        std_cache_path = os.path.join(self.cache_dir, f'normalizer_std_{self.fold_id}.pt')
+        if os.path.exists(mean_cache_path) and os.path.exists(std_cache_path):
+            mean = torch.load(mean_cache_path)
+            std = torch.load(std_cache_path)
+            assert mean.shape[0] == std.shape[0] == self.dataset.preprocessing_params['n_mfcc'], \
+                f"""Mean and std cache shape mismatch: {mean.shape[0]} and {std.shape[0]}
+                while {self.dataset.preprocessing_params['n_mfcc']} was given in config"""
+        else:
+            records = 0
+            mean = torch.zeros(self.dataset.preprocessing_params['n_mfcc'])
+            std = torch.zeros(self.dataset.preprocessing_params['n_mfcc'])
+
+            for mfcc in self.dataloader:
+                sample_records = len(mfcc)
+                sample_mean = torch.mean(mfcc, axis=0)
+                mean = (mean * records + sample_mean * sample_records) / (records + sample_records)
+                sample_std = torch.std(mfcc, axis=0)
+                std = (std * records + sample_std * sample_records) / (records + sample_records)
+                records += sample_records
+            torch.save(mean, mean_cache_path)
+            torch.save(std, std_cache_path)
+            
+        return mean, std
+
+    @staticmethod
+    def _internal_collate_fn(batch: t.List[torch.Tensor]) -> torch.Tensor:
+        return torch.cat([mfcc for mfcc, _ in batch], 0)
+
+    def collate_fn(self, batch: t.List[torch.Tensor]) -> torch.Tensor:
+        max_length = max((len(sequence) for sequence, _ in batch))
+        n_channels = max((sequence.shape[1] for sequence, _ in batch))
+        padded_sequences = torch.zeros(len(batch), max_length, n_channels)
+        
+        labels = list()
+        sequences_lengths = list()
+        
+        for i, (mfcc, label) in enumerate(batch):
+            seq_len = len(mfcc)
+            normalized_mfcc = (mfcc - self.mean) / self.std
+            padded_sequences[i][max_length - seq_len : ] = normalized_mfcc
+            labels.append(label)
+            sequences_lengths.append(seq_len)
+            
+        labels_tensor = torch.stack(labels)
+        return padded_sequences, labels_tensor, sequences_lengths
+
 
 class DataBuilder:
     def __init__(
         self, 
-        data_path, 
-        onehot_encoding, 
-        preprocessing_params, 
-        num_folds, 
-        cache_dir, 
-        overwrite_cache, 
+        data_path: str, 
+        onehot_encoding: bool, 
+        preprocessing_params: dict, 
+        num_folds: int, 
+        cache_dir: str, 
+        overwrite_cache: bool, 
         equalize
-        ):
+        ) -> None:
         self.onehot_encoding = onehot_encoding
         self.preprocessing_params = preprocessing_params
         cache_dir_name = '_'.join([f'{param}_{value}' for param, value in sorted(preprocessing_params.items())])
@@ -80,7 +198,7 @@ class DataBuilder:
         os.makedirs(self.cache_dir, exist_ok = True)
         self.folds, self.num_classes = self._get_folds(data_path, num_folds)
 
-    def _get_folds(self, data_path, num_folds):
+    def _get_folds(self, data_path: str, num_folds: int) -> t.Tuple[t.List[Fold], int]:
         fold_paths = [os.path.join(self.cache_dir, f'fold_{i}.csv') for i in range(num_folds)]
 
         if all([os.path.exists(fold_path) for fold_path in fold_paths]):
@@ -112,10 +230,10 @@ class DataBuilder:
                 metadata_fold.to_csv(fold_path, index=False)
         return metadata_folds, num_classes
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.folds)
     
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> t.Tuple[VoxDataset, VoxDataset, InputNormalizer]:
         train_metadata = pd.concat(
             [fold for i, fold in enumerate(self.folds) if i != idx],
             ignore_index=True
@@ -126,7 +244,7 @@ class DataBuilder:
         input_normalizer = InputNormalizer(train_dataset)
         return train_dataset, val_dataset, input_normalizer
 
-    def _get_dataset(self, metadata, fold_id):
+    def _get_dataset(self, metadata: pd.DataFrame, fold_id: int) -> VoxDataset:
         return VoxDataset(
             metadata, 
             self.num_classes, 
@@ -135,110 +253,3 @@ class DataBuilder:
             self.cache_dir,
             fold_id
             )
-
-
-class VoxDataset(Dataset):
-    def __init__(self, metadata, num_classes, onehot_encoding, preprocessing_params, cache_dir, fold_id):
-        self.metadata = metadata
-        self.num_classes = num_classes
-        self.label_fun = self._onehot if onehot_encoding else lambda x: x
-        self.preprocessing_params = preprocessing_params
-        self.cache_dir = cache_dir
-        self.fold_id = fold_id
-    
-    def _onehot(self, idx):
-        vector = np.zeros(self.num_classes)
-        vector[idx] = 1
-        return vector
-    
-    def __len__(self):
-        return len(self.metadata)
-
-    def __iter__(self):
-        return (self[idx] for idx in range(len(self)))
-    
-    def __getitem__(self, idx):
-        recording_metadata = self.metadata.loc[idx]
-        label_tensor = torch.tensor(self.label_fun(recording_metadata['label']))
-        filepath = recording_metadata['filepath']
-        cache_name = '_'.join(filepath.split('/')[-2:])
-        cache_path = os.path.join(self.cache_dir, cache_name)
-        if os.path.exists(cache_path):
-            mfcc_tensor = torch.load(cache_path)
-            assert mfcc_tensor.shape[1] == self.preprocessing_params['n_mfcc'], \
-                f"""MFCC cache shape mismatch: {mfcc_tensor.shape[1]} 
-                while {self.preprocessing_params['n_mfcc']} was given in config"""
-        else:
-            audio, sr = librosa.core.load(filepath, sr=None)
-            mfcc_tensor = torch.tensor(
-                librosa.feature.mfcc(
-                    audio,
-                    sr,
-                    **self.preprocessing_params
-                    ).transpose()
-                )
-            torch.save(mfcc_tensor, cache_path)
-        return mfcc_tensor, label_tensor
-    
-class InputNormalizer:
-    def __init__(self, dataset):
-        self.dataset = dataset
-        self.dataloader = DataLoader(
-            dataset, 
-            batch_size=48,
-            shuffle=False,
-            num_workers=12,
-            drop_last=False,
-            collate_fn=self._internal_collate_fn
-            )
-        self.cache_dir = self.dataset.cache_dir
-        self.fold_id = self.dataset.fold_id
-        self.mean, self.std = self._get_mean_std()
-        
-    def _get_mean_std(self):
-        mean_cache_path = os.path.join(self.cache_dir, f'normalizer_mean_{self.fold_id}.pt')
-        std_cache_path = os.path.join(self.cache_dir, f'normalizer_std_{self.fold_id}.pt')
-        if os.path.exists(mean_cache_path) and os.path.exists(std_cache_path):
-            mean = torch.load(mean_cache_path)
-            std = torch.load(std_cache_path)
-            assert mean.shape[0] == std.shape[0] == self.dataset.preprocessing_params['n_mfcc'], \
-                f"""Mean and std cache shape mismatch: {mean.shape[0]} and {std.shape[0]}
-                while {self.dataset.preprocessing_params['n_mfcc']} was given in config"""
-        else:
-            records = 0
-            mean = torch.zeros(self.dataset.preprocessing_params['n_mfcc'])
-            std = torch.zeros(self.dataset.preprocessing_params['n_mfcc'])
-
-            for mfcc in self.dataloader:
-                sample_records = len(mfcc)
-                sample_mean = torch.mean(mfcc, axis=0)
-                mean = (mean * records + sample_mean * sample_records) / (records + sample_records)
-                sample_std = torch.std(mfcc, axis=0)
-                std = (std * records + sample_std * sample_records) / (records + sample_records)
-                records += sample_records
-            torch.save(mean, mean_cache_path)
-            torch.save(std, std_cache_path)
-            
-        return mean, std
-
-    @staticmethod
-    def _internal_collate_fn(batch):
-        return torch.cat([mfcc for mfcc, _ in batch], 0)
-
-    def collate_fn(self, batch):
-        max_length = max((len(sequence) for sequence, _ in batch))
-        n_channels = max((sequence.shape[1] for sequence, _ in batch))
-        padded_sequences = torch.zeros(len(batch), max_length, n_channels)
-        
-        labels = list()
-        sequences_lengths = list()
-        
-        for i, (mfcc, label) in enumerate(batch):
-            seq_len = len(mfcc)
-            normalized_mfcc = (mfcc - self.mean) / self.std
-            padded_sequences[i][max_length - seq_len : ] = normalized_mfcc
-            labels.append(label)
-            sequences_lengths.append(seq_len)
-            
-        labels_tensor = torch.stack(labels)
-        return padded_sequences, labels_tensor, sequences_lengths

@@ -1,17 +1,85 @@
+import typing as t
+
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
+import torch
+
+from data import VoxDataset
+
+class ScoresMonitor:
+    def __init__(self, data_train: VoxDataset, data_val: VoxDataset) -> None:
+        self.data_train = data_train
+        self.data_val = data_val
+        self.num_classes = len(self.data_train.metadata['label'].unique())
+        self.train_monitor = ScoreMonitor()
+        self.val_monitor = ScoreMonitor(self.num_classes)
+
+    def get_train_size(self) -> int:
+        return len(self.data_train)
+
+    def get_val_size(self) -> int:
+        return len(self.data_val)
+
+    def get_baseline_accurate_predictions(self) -> int:
+        mode_class = self.data_train.metadata['label'].value_counts().index[0]
+        return len(self.data_val.metadata.query(f'label=={mode_class}'))
+
+
+class ScoreMonitor:
+    def __init__(self, num_classes: t.Union[int, None] = None) -> None:
+        self.num_classes = num_classes
+        self.loss = 0
+        self.epochs_loss = list()
+        self.accurate_predictions = 0
+        self.sum_records = 0
+        self.num_records = 0
+        self.epochs_accurate_predictions = list()
+        self.confusion_matrixes = None
+        if self.num_classes:
+            self.confusion_matrixes = list()
+            self.epoch_confusion_matrix = np.zeros(
+                [self.num_classes, self.num_classes], 
+                dtype=int
+                )
+
+    def add_loss_and_predictions(
+        self, 
+        loss: torch.Tensor, 
+        outputs: torch.Tensor, 
+        labels: torch.Tensor
+    ) -> None:
+        self.loss += loss.item()
+        predictions = np.argmax(outputs.cpu().detach().numpy(), axis=1)
+        labels = labels.cpu().detach().numpy()
+        self.accurate_predictions += sum(predictions==labels).item()
+        self.num_records += len(predictions)
+        if self.confusion_matrixes is not None:
+            for prediction, label in zip(predictions, labels):
+                self.epoch_confusion_matrix[prediction, label] += 1
+
+    def append_epoch_loss_and_score(self) -> None:
+        self.sum_records = self.num_records
+        self.epochs_loss.append(self.loss)
+        self.epochs_accurate_predictions.append(self.accurate_predictions)
+        self.accurate_predictions = 0
+        self.num_records = 0
+        self.loss = 0
+        if self.confusion_matrixes is not None:
+            self.confusion_matrixes.append(self.epoch_confusion_matrix)
+            self.epoch_confusion_matrix = np.zeros([self.num_classes, self.num_classes])
+
 
 
 class ExperimentMonitor:
-    def __init__(self, config):
+    def __init__(self, config: t.Dict) -> None:
         self.config = config
         self.scores_monitors = []
 
-    def add_scores_monitor(self, scores_monitor):
+    def add_scores_monitor(self, scores_monitor: ScoresMonitor) -> None:
         self.scores_monitors.append(scores_monitor)
 
-    def show_scores(self):
+    def show_scores(self) -> t.Tuple[float]:
         train_records = sum([scores_monitor.train_monitor.sum_records \
             for scores_monitor in self.scores_monitors])
         val_records = sum([scores_monitor.val_monitor.sum_records \
@@ -61,61 +129,3 @@ class ExperimentMonitor:
         ax.tick_params(labelbottom = False, labeltop=True)
         plt.show()
         return round(best_score, 2), best_score_index + 1, best_score_train_acc, best_score_loss
-
-
-class ScoresMonitor:
-    def __init__(self, data_train, data_val):
-        self.data_train = data_train
-        self.data_val = data_val
-        self.num_classes = len(self.data_train.metadata['label'].unique())
-        self.train_monitor = ScoreMonitor()
-        self.val_monitor = ScoreMonitor(self.num_classes)
-
-    def get_train_size(self):
-        return len(self.data_train)
-
-    def get_val_size(self):
-        return len(self.data_val)
-
-    def get_baseline_accurate_predictions(self):
-        mode_class = self.data_train.metadata['label'].value_counts().index[0]
-        return len(self.data_val.metadata.query(f'label=={mode_class}'))
-
-
-class ScoreMonitor:
-    def __init__(self, num_classes=None):
-        self.num_classes = num_classes
-        self.loss = 0
-        self.epochs_loss = list()
-        self.accurate_predictions = 0
-        self.sum_records = 0
-        self.num_records = 0
-        self.epochs_accurate_predictions = list()
-        self.confusion_matrixes = None
-        if self.num_classes:
-            self.confusion_matrixes = list()
-            self.epoch_confusion_matrix = np.zeros(
-                [self.num_classes, self.num_classes], 
-                dtype=int
-                )
-
-    def add_loss_and_predictions(self, loss, outputs, labels):
-        self.loss += loss.item()
-        predictions = np.argmax(outputs.cpu().detach().numpy(), axis=1)
-        labels = labels.cpu().detach().numpy()
-        self.accurate_predictions += sum(predictions==labels).item()
-        self.num_records += len(predictions)
-        if self.confusion_matrixes is not None:
-            for prediction, label in zip(predictions, labels):
-                self.epoch_confusion_matrix[prediction, label] += 1
-
-    def append_epoch_loss_and_score(self):
-        self.sum_records = self.num_records
-        self.epochs_loss.append(self.loss)
-        self.epochs_accurate_predictions.append(self.accurate_predictions)
-        self.accurate_predictions = 0
-        self.num_records = 0
-        self.loss = 0
-        if self.confusion_matrixes is not None:
-            self.confusion_matrixes.append(self.epoch_confusion_matrix)
-            self.epoch_confusion_matrix = np.zeros([self.num_classes, self.num_classes])
