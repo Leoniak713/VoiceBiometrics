@@ -7,24 +7,6 @@ import torch
 
 from data import VoxDataset
 
-class ScoresMonitor:
-    def __init__(self, data_train: VoxDataset, data_val: VoxDataset) -> None:
-        self.data_train = data_train
-        self.data_val = data_val
-        self.num_classes = len(self.data_train.metadata['label'].unique())
-        self.train_monitor = ScoreMonitor()
-        self.val_monitor = ScoreMonitor(self.num_classes)
-
-    def get_train_size(self) -> int:
-        return len(self.data_train)
-
-    def get_val_size(self) -> int:
-        return len(self.data_val)
-
-    def get_baseline_accurate_predictions(self) -> int:
-        mode_class = self.data_train.metadata['label'].value_counts().index[0]
-        return len(self.data_val.metadata.query(f'label=={mode_class}'))
-
 
 class ScoreMonitor:
     def __init__(self, num_classes: t.Union[int, None] = None) -> None:
@@ -42,6 +24,9 @@ class ScoreMonitor:
                 [self.num_classes, self.num_classes], 
                 dtype=int
                 )
+
+    def __getitem__(self, key: str) -> t.Any:
+        return getattr(self, key)
 
     def add_loss_and_predictions(
         self, 
@@ -70,6 +55,27 @@ class ScoreMonitor:
             self.epoch_confusion_matrix = np.zeros([self.num_classes, self.num_classes])
 
 
+class ScoresMonitor:
+    def __init__(self, data_train: VoxDataset, data_val: VoxDataset) -> None:
+        self.data_train = data_train
+        self.data_val = data_val
+        self.num_classes = len(self.data_train.metadata['label'].unique())
+        self.train_monitor = ScoreMonitor()
+        self.val_monitor = ScoreMonitor(self.num_classes)
+
+    def __getitem__(self, key: str) -> t.Any:
+        return getattr(self, key)
+
+    def get_train_size(self) -> int:
+        return len(self.data_train)
+
+    def get_val_size(self) -> int:
+        return len(self.data_val)
+
+    def get_baseline_accurate_predictions(self) -> int:
+        mode_class = self.data_train.metadata['label'].value_counts().index[0]
+        return len(self.data_val.metadata.query(f'label=={mode_class}'))
+
 
 class ExperimentMonitor:
     def __init__(self, config: t.Dict) -> None:
@@ -79,29 +85,46 @@ class ExperimentMonitor:
     def add_scores_monitor(self, scores_monitor: ScoresMonitor) -> None:
         self.scores_monitors.append(scores_monitor)
 
+    def _get_monitors_stats_sum(
+        self, 
+        monitor_type: str, 
+        stat: str, 
+        iterable_stat: bool
+    ) -> float:
+        transform_func = np.array if iterable_stat else lambda x: x
+        return sum(transform_func(scores_monitor[monitor_type][stat]) \
+            for scores_monitor in self.scores_monitors)
+
+    def _get_baseline_accurate_predictions(self) -> float:
+        return sum(scores_monitor.get_baseline_accurate_predictions() \
+            for scores_monitor in self.scores_monitors)
+
     def show_scores(self) -> t.Tuple[float]:
-        train_records = sum([scores_monitor.train_monitor.sum_records \
-            for scores_monitor in self.scores_monitors])
-        val_records = sum([scores_monitor.val_monitor.sum_records \
-            for scores_monitor in self.scores_monitors])
-        train_accuracy = sum([
-            np.array(scores_monitor.train_monitor.epochs_accurate_predictions) \
-            for scores_monitor in self.scores_monitors]) / train_records * 100
-        val_accuracy = sum([
-            np.array(scores_monitor.val_monitor.epochs_accurate_predictions) \
-            for scores_monitor in self.scores_monitors]) / val_records * 100
-        train_loss = sum([
-            np.array(scores_monitor.train_monitor.epochs_loss) \
-            for scores_monitor in self.scores_monitors]) / train_records
-        val_loss = sum([
-            np.array(scores_monitor.val_monitor.epochs_loss) \
-            for scores_monitor in self.scores_monitors]) / val_records
-        val_confusion_matrixes = sum([
-            np.array(scores_monitor.val_monitor.confusion_matrixes) \
-            for scores_monitor in self.scores_monitors])
-        baseline_accuracy = sum([
-            scores_monitor.get_baseline_accurate_predictions() \
-            for scores_monitor in self.scores_monitors]) / val_records * 100
+        train_records = self._get_monitors_stats_sum('train_monitor', 'sum_records', False)
+        val_records = self._get_monitors_stats_sum('val_monitor', 'sum_records', False)
+        train_accuracy = self._get_monitors_stats_sum(
+            'train_monitor', 
+            'epochs_accurate_predictions',
+            True
+        ) / train_records * 100
+        val_accuracy = self._get_monitors_stats_sum(
+            'val_monitor', 
+            'epochs_accurate_predictions', 
+            True
+        ) / val_records * 100
+        train_loss = self._get_monitors_stats_sum(
+            'train_monitor', 
+            'epochs_loss', 
+            True
+        ) / train_records
+        val_loss = self._get_monitors_stats_sum('val_monitor', 'epochs_loss', True) / val_records
+        val_confusion_matrixes = self._get_monitors_stats_sum(
+            'val_monitor', 
+            'confusion_matrixes', 
+            True
+        )
+        baseline_accuracy = self._get_baseline_accurate_predictions() / val_records * 100
+
         best_score_index, best_score = max(enumerate(val_accuracy), key=lambda p: p[1])
         best_score_train_acc = round(train_accuracy[best_score_index], 2)
         best_score_loss = round(val_loss[best_score_index], 4)
