@@ -56,7 +56,7 @@ class FoldsBuilder:
                 smallest_fold = fold
         return smallest_fold
     
-    def add(self, data: t.List) -> None:
+    def add_data(self, data: t.List) -> None:
         smallest_fold = self._get_smallest_fold()
         smallest_fold.extend(data)
 
@@ -222,7 +222,7 @@ class DataBuilder:
                     user_metadata.append(metadata)
                     
                 for metadata in sorted(user_metadata, key=lambda x: len(x), reverse=True):
-                    folds.add(metadata)
+                    folds.add_data(metadata)
                     
             metadata_folds = [pd.DataFrame(fold.metadata, columns=['filepath', 'label']) for fold in folds]
 

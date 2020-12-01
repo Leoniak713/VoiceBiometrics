@@ -69,7 +69,7 @@ class BiggerCNNLSTM(nn.Module):
             )
         self.output_layer = nn.Linear(config['fc_layers'][-1][0], self.num_outputs)
         
-    def get_initial_state(self, batch_size: int) -> torch.Tensor:
+    def _get_initial_state(self, batch_size: int) -> torch.Tensor:
         return torch.zeros(
             self.config['lstm'][0]['num_layers'] * self.bidirectionally_coef, 
             batch_size, 
@@ -78,8 +78,8 @@ class BiggerCNNLSTM(nn.Module):
             )
 
     def forward(self, x: torch.Tensor, lstm_position: int = -1) -> None:
-        h0 = self.get_initial_state(x.shape[0])
-        c0 = self.get_initial_state(x.shape[0])
+        h0 = self._get_initial_state(x.shape[0])
+        c0 = self._get_initial_state(x.shape[0])
         
         x = x.permute(0, 2, 1)
         for conv_layer in self.conv_layers:

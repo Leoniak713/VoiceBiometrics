@@ -18,7 +18,7 @@ class HPSParser:
     def __init__(self, source_config: t.Dict) -> None:
         self.source_config = source_config
 
-    def parse_config(self, subelement: t.Any) -> None:
+    def _parse_config(self, subelement: t.Any) -> None:
         subelement_iterator = None
         if isinstance(subelement, dict):
             subelement_iterator = subelement.items()
@@ -31,10 +31,10 @@ class HPSParser:
                     subelement[key] = variant
                     self.drawn_variants[value.get_param_name(key)] = variant
                 else:
-                    self.parse_config(value)
+                    self._parse_config(value)
 
     def draw_config(self) -> t.Tuple[t.Dict, t.List[str]]:
         config = copy.deepcopy(self.source_config)
         self.drawn_variants = {}
-        self.parse_config(config)
+        self._parse_config(config)
         return config, self.drawn_variants
